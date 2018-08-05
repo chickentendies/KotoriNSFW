@@ -44,6 +44,13 @@ namespace Kotori
         public void PostTweet(string text, IMedia media)
             => PostTweet(text, new[] { media });
 
+        public IMedia UploadMedia(byte[] bytes)
+        {
+            return Auth.ExecuteOperationWithCredentials(TwitterCredentials, () => {
+                return Upload.UploadBinary(bytes);
+            });
+        }
+
         public IMedia UploadMedia(IOStream stream)
         {
             IMedia media = null;

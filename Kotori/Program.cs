@@ -96,6 +96,45 @@ namespace Kotori
                     bot.RefreshCache();
                 }
 
+            Console.WriteLine();
+            Console.WriteLine(@"Making a post on all accounts...");
+
+            foreach (TwitterBot bot in bots)
+            {
+                Console.WriteLine(bot.Name);
+                IBooruPost randomPost = bot.GetRandomPost();
+                IMedia media = null;
+
+                Console.WriteLine(randomPost.PostUrl);
+
+                HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
+                {
+                    if (!get.IsCompletedSuccessfully)
+                        return;
+
+                    get.Result.Content.ReadAsByteArrayAsync().ContinueWith(bytes =>
+                    {
+                        if (!bytes.IsCompletedSuccessfully)
+                            return;
+
+                        File.WriteAllBytes(Environment.TickCount + "." + randomPost.FileExtension, bytes.Result);
+                        media = bot.Client.UploadMedia(bytes.Result);
+                    }).Wait();
+                }).Wait();
+
+                if (media == null)
+                    continue;
+
+                while (!media.IsReadyToBeUsed) { Console.WriteLine(media.IsReadyToBeUsed); Thread.Sleep(1000); }
+
+                try
+                {
+                    bot.Client.PostTweet(randomPost.PostUrl, media);
+                    bot.DeletePost(randomPost.PostId);
+                }
+                catch { }
+            }
+
             MRE.WaitOne();
 
             foreach (TwitterBot bot in bots)

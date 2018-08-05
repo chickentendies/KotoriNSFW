@@ -28,6 +28,44 @@ namespace Kotori
             Client = client;
         }
 
+        public IBooruPost GetRandomPost()
+        {
+            try
+            {
+                using (SQLiteCommand fetchPost = Database.Command($@"
+                    SELECT `post_id`, `post_url`, `post_rating`, `file_url`, `file_hash`, `file_extension`
+                    FROM `booru_posts`
+                    WHERE `bot_id` = {Id}
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                "))
+                using (SQLiteDataReader dr = fetchPost.ExecuteReader())
+                    if (dr.Read())
+                        return new DatabaseBooruPost
+                        {
+                            PostId = dr.GetString(0),
+                            PostUrl = dr.GetString(1),
+                            Rating = dr.GetString(2),
+                            FileUrl = dr.GetString(3),
+                            FileHash = dr.GetString(4),
+                            FileExtension = dr.GetString(5),
+                        };
+            }
+            catch { }
+
+            return null;
+        }
+
+        public void DeletePost(string postId)
+        {
+            using (SQLiteCommand deletePost = Database.Command($@"DELETE FROM `booru_posts` WHERE `bot_id` = {Id} AND `post_id` = @post"))
+            {
+                deletePost.Parameters.Add(new SQLiteParameter(@"@post", postId));
+                deletePost.Prepare();
+                deletePost.ExecuteNonQuery();
+            }
+        }
+
         public bool EnsureCacheReady()
         {
             using (SQLiteCommand check = Database.Command($@"SELECT COUNT(`post_id`) > 0 FROM `booru_posts` WHERE `bot_id` = {Id}")) // you can't really exploit a hard in anyway
@@ -79,7 +117,7 @@ namespace Kotori
                     {
                         foreach (IBooruPost post in posts)
                         {
-                            if (string.IsNullOrEmpty(post.FileHash))
+                            if (string.IsNullOrEmpty(post.FileHash) || post.Rating != @"s") // hardcoding worksafe for now
                                 continue;
 
                             check.Parameters.Clear();
