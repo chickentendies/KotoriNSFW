@@ -5,48 +5,64 @@ using Kotori.Images.Konachan;
 using Kotori.Images.Yandere;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using Tweetinvi.Models;
-
-// TODO: add cancellation check after every step
-//       would make sense to also split actions up into functions
 
 namespace Kotori
 {
     public static partial class Program
     {
+        public static readonly Version Version = new Version(4, 0);
+
         public static readonly HttpClient HttpClient = new HttpClient();
         public static DatabaseManager Database { get; private set; }
 
-        public static readonly ManualResetEvent MRE = new ManualResetEvent(false);
-        public static readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
+        private static readonly ManualResetEvent MRE = new ManualResetEvent(false);
+        private static readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
+        private static Timer Timer;
+
+        public static TimeSpan Interval => TimeSpan.FromMinutes(15);
+        public static TimeSpan UntilNextRun
+        {
+            get
+            {
+                DateTime now = DateTime.Now;
+                return now.RoundUp(Interval) - now;
+            }
+        }
+
+        public static readonly List<TwitterBot> Bots = new List<TwitterBot>();
 
         public static void Main(string[] args)
         {
             Cancellation.Token.Register(() => MRE.Set());
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; Cancellation.Cancel(); };
+            AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
 
-            Console.WriteLine(@"Kotori REDUX v1");
+            Console.WriteLine($@"Kotori v{Version}");
             Console.WriteLine(@"THis is still experimental, don't look at it.");
 
-            Console.WriteLine(@"Creating database manager...");
+            LogHeader(@"Creating database manager...");
             Database = new DatabaseManager();
-            Console.WriteLine(@"Running migrations...");
+
+            LogHeader(@"Running migrations...");
             Database.RunMigrations();
 
             MigrateIni();
 
             if (string.IsNullOrEmpty(Database.ReadConfig(@"twitter_consumer_key")))
             {
+                LogHeader(@"Set up Twitter API keys...");
                 Console.WriteLine(@"Please enter your Twitter Consumer Key:");
                 Database.WriteConfig(@"twitter_consumer_key", Console.ReadLine());
                 Console.WriteLine(@"And now your Twitter Consumer Secret:");
                 Database.WriteConfig(@"twitter_consumer_secret", Console.ReadLine());
             }
 
-            Console.WriteLine();
-            Console.WriteLine(@"Creating booru clients...");
+            LogHeader(@"Creating booru clients...");
 
             IBooru[] boorus = new IBooru[] {
                 new Danbooru(HttpClient),
@@ -59,99 +75,174 @@ namespace Kotori
                 Database.ReadConfig(@"twitter_consumer_key"),
                 Database.ReadConfig(@"twitter_consumer_secret")
             );
-            List<TwitterBot> bots = new List<TwitterBot>();
 
-            Console.WriteLine();
-            Console.WriteLine(@"Creating bots...");
+            LogHeader(@"Creating bots...");
 
-            foreach (TwitterBotInfo botInfo in Database.GetBots())
-            {
-                ITwitterCredentials creds;
-
-                if (string.IsNullOrEmpty(botInfo.AccessToken) || string.IsNullOrEmpty(botInfo.AccessTokenSecret))
+            lock (Bots)
+                foreach (TwitterBotInfo botInfo in Database.GetBots())
                 {
-                    IAuthenticationContext ac = TwitterClient.BeginCreateClient(cc);
-                    Console.WriteLine();
-                    Console.WriteLine($@"====> Authenticate {botInfo.Name} <====");
-                    Console.WriteLine(ac.AuthorizationURL);
-                    Console.WriteLine(@"Enter the pin code you received:");
+                    if (Cancellation.IsCancellationRequested)
+                        break;
 
-                    string pin = Console.ReadLine();
-                    creds = TwitterClient.EndCreateClient(ac, pin);
-                }
-                else creds = new TwitterCredentials(cc.ConsumerKey, cc.ConsumerSecret, botInfo.AccessToken, botInfo.AccessTokenSecret);
+                    ITwitterCredentials creds;
 
-                bots.Add(new TwitterBot(
-                    Database,
-                    boorus,
-                    botInfo,
-                    new TwitterClient(creds)
-                ));
-            }
-
-            Console.WriteLine();
-            Console.WriteLine(@"Validating cache...");
-
-            foreach (TwitterBot bot in bots)
-                if (!bot.EnsureCacheReady())
-                {
-                    Console.WriteLine($@"Refreshing cache for {bot.Name}, this may take a little bit...");
-                    bot.RefreshCache();
-                }
-
-            Console.WriteLine();
-            Console.WriteLine(@"Making a post on all accounts...");
-
-            foreach (TwitterBot bot in bots)
-            {
-                Console.WriteLine(bot.Name);
-                IBooruPost randomPost = bot.GetRandomPost();
-                IMedia media = null;
-
-                Console.WriteLine(randomPost.PostUrl);
-
-                HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
-                {
-                    if (!get.IsCompletedSuccessfully)
-                        return;
-
-                    get.Result.Content.ReadAsStreamAsync().ContinueWith(bytes =>
+                    if (string.IsNullOrEmpty(botInfo.AccessToken) || string.IsNullOrEmpty(botInfo.AccessTokenSecret))
                     {
-                        if (!bytes.IsCompletedSuccessfully)
-                            return;
+                        IAuthenticationContext ac = TwitterClient.BeginCreateClient(cc);
+                        Console.WriteLine();
+                        Console.WriteLine($@"====> Authenticate {botInfo.Name} <====");
+                        Console.WriteLine(ac.AuthorizationURL);
+                        Console.WriteLine(@"Enter the pin code you received:");
 
-                        media = bot.Client.UploadMedia(bytes.Result);
-                    }).Wait();
-                }).Wait();
+                        string pin = Console.ReadLine();
+                        creds = TwitterClient.EndCreateClient(ac, pin);
+                    }
+                    else creds = new TwitterCredentials(cc.ConsumerKey, cc.ConsumerSecret, botInfo.AccessToken, botInfo.AccessTokenSecret);
 
-                if (media == null)
-                    continue;
-                
-                try
-                {
-                    bot.Client.PostTweet(randomPost.PostUrl, media);
-                    bot.DeletePost(randomPost.PostId);
+                    Bots.Add(new TwitterBot(
+                        Database,
+                        boorus,
+                        botInfo,
+                        new TwitterClient(creds)
+                    ));
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine(ex);
-                    Cancellation.Cancel();
-                    break;
-                }
-            }
 
+            Console.WriteLine($@"Posting after {UntilNextRun}, then a new post will be made every {Interval}!");
+            StartTimer(Run);
             MRE.WaitOne();
 
-            foreach (TwitterBot bot in bots)
-                bot.Dispose();
+            lock (Bots)
+                foreach (TwitterBot bot in Bots)
+                    bot.Dispose();
 
             Database.Dispose();
+        }
+
+        private static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
+        {
+            DateTime now = DateTime.Now;
+            StringBuilder sb = new StringBuilder();
+
+            sb.Append($@"Kotori v{Version}");
+#if DEBUG
+            sb.Append(@" Debug Build");
+#endif
+            sb.AppendLine();
+
+            sb.AppendLine($@"Unhandled exception on {now}");
+            sb.AppendLine($@"Is Terminating: {e.IsTerminating}");
+            sb.AppendLine();
+
+            Exception ex = e.ExceptionObject as Exception;
+
+            while (ex != null)
+            {
+                sb.Append(ex);
+                sb.AppendLine();
+                sb.AppendLine();
+                ex = ex.InnerException;
+            }
+
+            string filename = $@"Kotori {now:yyyy-MM-dd HH.mm.ss}.log";
+            File.WriteAllText(filename, sb.ToString());
+
+            Console.BackgroundColor = ConsoleColor.Black;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine();
+            Console.WriteLine(@"An unhandled exception has occurred.");
+            Console.WriteLine($@"The log has been saved to '{filename}'.");
+            Console.WriteLine(@"Please send this file to Flashwave <me@flash.moe> so he can fix it!");
+            Console.WriteLine(@"Press enter to exit...");
+            Console.ResetColor();
             Console.ReadLine();
         }
 
-        private static void StartDatabase()
+        public static void ExitIfCancelled(int exitCode = 0)
         {
-            //
+            if (Cancellation.IsCancellationRequested)
+                Environment.Exit(exitCode);
+        }
+
+        public static void LogHeader(string header)
+        {
+            ExitIfCancelled();
+            Console.WriteLine();
+            Console.WriteLine(header);
+        }
+
+        public static void StartTimer(Action action)
+        {
+            StopTimer();
+            Timer = new Timer(s => action.Invoke(), null, UntilNextRun, Interval);
+        }
+
+        public static void StopTimer()
+        {
+            Timer?.Dispose();
+            Timer = null;
+        }
+
+        public static void Run()
+        {
+            lock (Bots)
+            {
+                LogHeader(@"Validating cache...");
+
+                foreach (TwitterBot bot in Bots)
+                {
+                    if (Cancellation.IsCancellationRequested)
+                        break;
+
+                    if (!bot.EnsureCacheReady())
+                    {
+                        Console.WriteLine($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                        bot.RefreshCache();
+                    }
+                }
+
+                LogHeader(@"Making a post on all accounts...");
+
+                foreach (TwitterBot bot in Bots)
+                {
+                    if (Cancellation.IsCancellationRequested)
+                        break;
+
+                    Console.WriteLine(bot.Name);
+                    IBooruPost randomPost = bot.GetRandomPost();
+                    IMedia media = null;
+
+                    Console.WriteLine(randomPost.PostUrl);
+
+                    HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
+                    {
+                        if (!get.IsCompletedSuccessfully)
+                            return;
+
+                        get.Result.Content.ReadAsStreamAsync().ContinueWith(bytes =>
+                        {
+                            if (!bytes.IsCompletedSuccessfully)
+                                return;
+
+                            media = bot.Client.UploadMedia(bytes.Result);
+                        }).Wait();
+                    }).Wait();
+
+                    if (media == null)
+                        continue;
+
+                    try
+                    {
+                        bot.Client.PostTweet(randomPost.PostUrl, media);
+                        bot.DeletePost(randomPost.PostId);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine(ex);
+                        Cancellation.Cancel();
+                        break;
+                    }
+                }
+            }
         }
     }
 }

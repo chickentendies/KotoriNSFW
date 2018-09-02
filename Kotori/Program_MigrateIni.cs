@@ -14,7 +14,7 @@ namespace Kotori
             if (!File.Exists(LEGACY_CONFIG))
                 return;
 
-            Console.WriteLine(@"Migrating legacy configuration...");
+            LogHeader(@"Migrating legacy configuration...");
 
             string[] lines = File.ReadAllLines(LEGACY_CONFIG);
             string section = string.Empty;
