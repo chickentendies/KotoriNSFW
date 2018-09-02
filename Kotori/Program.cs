@@ -11,6 +11,9 @@ using System.Net.Http;
 using System.Threading;
 using Tweetinvi.Models;
 
+// TODO: add cancellation check after every step
+//       would make sense to also split actions up into functions
+
 namespace Kotori
 {
     public static partial class Program
@@ -19,10 +22,12 @@ namespace Kotori
         public static DatabaseManager Database { get; private set; }
 
         public static readonly ManualResetEvent MRE = new ManualResetEvent(false);
+        public static readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
 
         public static void Main(string[] args)
         {
-            Console.CancelKeyPress += (s, e) => { e.Cancel = true; MRE.Set(); };
+            Cancellation.Token.Register(() => MRE.Set());
+            Console.CancelKeyPress += (s, e) => { e.Cancel = true; Cancellation.Cancel(); };
 
             Console.WriteLine(@"Kotori REDUX v1");
             Console.WriteLine(@"THis is still experimental, don't look at it.");
@@ -82,7 +87,7 @@ namespace Kotori
                     Database,
                     boorus,
                     botInfo,
-                    new TwitterClient(new TwitterCredentials(creds))
+                    new TwitterClient(creds)
                 ));
             }
 
@@ -112,27 +117,29 @@ namespace Kotori
                     if (!get.IsCompletedSuccessfully)
                         return;
 
-                    get.Result.Content.ReadAsByteArrayAsync().ContinueWith(bytes =>
+                    get.Result.Content.ReadAsStreamAsync().ContinueWith(bytes =>
                     {
                         if (!bytes.IsCompletedSuccessfully)
                             return;
 
-                        File.WriteAllBytes(Environment.TickCount + "." + randomPost.FileExtension, bytes.Result);
                         media = bot.Client.UploadMedia(bytes.Result);
                     }).Wait();
                 }).Wait();
 
                 if (media == null)
                     continue;
-
-                while (!media.IsReadyToBeUsed) { Console.WriteLine(media.IsReadyToBeUsed); Thread.Sleep(1000); }
-
+                
                 try
                 {
                     bot.Client.PostTweet(randomPost.PostUrl, media);
                     bot.DeletePost(randomPost.PostId);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex);
+                    Cancellation.Cancel();
+                    break;
+                }
             }
 
             MRE.WaitOne();
@@ -141,24 +148,9 @@ namespace Kotori
                 bot.Dispose();
 
             Database.Dispose();
+            Console.ReadLine();
         }
-
-        public static void WriteUserCreds(string file, string token, string tokenSecret)
-        {
-            File.WriteAllLines(file, new[] { token, tokenSecret });
-        }
-
-        public static string[] ReadUserCreds(string file)
-        {
-            try
-            {
-                return File.ReadAllLines(file);
-            } catch
-            {
-                return new string[0];
-            }
-        }
-
+        
         public static void TwitterShit()
         {
             IConsumerCredentials cc = new ConsumerCredentials(

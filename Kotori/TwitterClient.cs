@@ -64,10 +64,7 @@ namespace Kotori
                     ms.Write(buffer, 0, read);
 
                 ms.Seek(0, SeekOrigin.Begin);
-
-                media = Auth.ExecuteOperationWithCredentials(TwitterCredentials, () => {
-                    return Upload.UploadBinary(ms.ToArray());
-                }); 
+                media = UploadMedia(ms.ToArray());
             }
 
             return media;
