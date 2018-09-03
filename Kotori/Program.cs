@@ -45,6 +45,8 @@ namespace Kotori
             Console.WriteLine($@"Kotori v{Version}");
             Console.WriteLine(@"THis is still experimental, don't look at it.");
 
+            CheckUpdates();
+
             LogHeader(@"Creating database manager...");
             Database = new DatabaseManager();
 
@@ -182,6 +184,41 @@ namespace Kotori
             Timer = null;
         }
 
+        private static string[] AvailableUpdate = null;
+
+        public static void CheckUpdates()
+        {
+            string[] updateLines = AvailableUpdate;
+
+            if (updateLines == null)
+            {
+                LogHeader(@"Checking for updates...");
+
+                try
+                {
+                    updateLines = HttpClient.GetAsync($@"https://flash.moe/kotori-version.txt?{DateTime.Now.Ticks}").Result.Content.ReadAsStringAsync().Result.Split('\n');
+                }
+                catch { }
+            }
+
+            if (updateLines == null)
+                Console.WriteLine(@"Failed to check for updates.");
+            else if (updateLines[0].Trim() != Version.ToString())
+            {
+                AvailableUpdate = updateLines;
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.BackgroundColor = ConsoleColor.Black;
+                Console.WriteLine($@"An update is available, the latest version is v{updateLines[0].Trim()}!");
+
+                if (updateLines.Length > 1)
+                    for (int i = 1; i < updateLines.Length; i++)
+                        Console.WriteLine(updateLines[i].Trim());
+                else Console.WriteLine(@"Check the download page or contact Flashwave <me@flash.moe> for more information.");
+
+                Console.ResetColor();
+            }
+        }
+
         public static void Run()
         {
             lock (Bots)
@@ -243,6 +280,8 @@ namespace Kotori
                     }
                 }
             }
+
+            CheckUpdates();
         }
     }
 }
