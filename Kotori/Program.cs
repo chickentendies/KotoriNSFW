@@ -15,6 +15,8 @@ namespace Kotori
 {
     public static partial class Program
     {
+        public const double BOTS_PER_THREAD = 3d;
+
         public static readonly Version Version = new Version(4, 0);
 
         public static readonly HttpClient HttpClient = new HttpClient();
@@ -223,6 +225,11 @@ namespace Kotori
         {
             lock (Bots)
             {
+                LogHeader(@"Spawning threads...");
+
+                int threadCount = (int)Math.Ceiling(Bots.Count / BOTS_PER_THREAD);
+                List<Thread> threads = new List<Thread>();
+
                 LogHeader(@"Validating cache...");
 
                 foreach (TwitterBot bot in Bots)
