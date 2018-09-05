@@ -6,6 +6,7 @@ using Kotori.Images.Yandere;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -221,6 +222,61 @@ namespace Kotori
             }
         }
 
+        public static void RunThread(int thread, int count)
+        {
+            int offset = thread * count;
+            LogHeader($@"Running Thread #{thread}");
+
+            IEnumerable<TwitterBot> bots = Bots.Skip(offset).Take(count);
+
+            foreach (TwitterBot bot in bots)
+            {
+                LogHeader($@"Validating cache for {bot.Name}");
+
+                if (!bot.EnsureCacheReady())
+                {
+                    Console.WriteLine($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                    bot.RefreshCache();
+                }
+
+                LogHeader($@"Posting to Twitter from {bot.Name}");
+
+                IBooruPost randomPost = bot.GetRandomPost();
+                IMedia media = null;
+
+                Console.WriteLine(randomPost.PostUrl);
+
+                HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
+                {
+                    if (!get.IsCompletedSuccessfully)
+                        return;
+
+                    get.Result.Content.ReadAsStreamAsync().ContinueWith(bytes =>
+                    {
+                        if (!bytes.IsCompletedSuccessfully)
+                            return;
+
+                        media = bot.Client.UploadMedia(bytes.Result);
+                    }).Wait();
+                }).Wait();
+
+                if (media == null)
+                    continue;
+
+                try
+                {
+                    bot.Client.PostTweet(randomPost.PostUrl, media);
+                    bot.DeletePost(randomPost.PostId);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex);
+                    Cancellation.Cancel();
+                    break;
+                }
+            }
+        }
+
         public static void Run()
         {
             lock (Bots)
@@ -230,62 +286,14 @@ namespace Kotori
                 int threadCount = (int)Math.Ceiling(Bots.Count / BOTS_PER_THREAD);
                 List<Thread> threads = new List<Thread>();
 
-                LogHeader(@"Validating cache...");
-
-                foreach (TwitterBot bot in Bots)
+                for (int i = 0; i < threadCount; i++)
                 {
-                    if (Cancellation.IsCancellationRequested)
-                        break;
-
-                    if (!bot.EnsureCacheReady())
-                    {
-                        Console.WriteLine($@"Refreshing cache for {bot.Name}, this may take a little bit...");
-                        bot.RefreshCache();
-                    }
+                    Thread t = new Thread(() => RunThread(i, (int)BOTS_PER_THREAD));
+                    threads.Add(t);
+                    t.Start();
                 }
 
-                LogHeader(@"Making a post on all accounts...");
-
-                foreach (TwitterBot bot in Bots)
-                {
-                    if (Cancellation.IsCancellationRequested)
-                        break;
-
-                    Console.WriteLine(bot.Name);
-                    IBooruPost randomPost = bot.GetRandomPost();
-                    IMedia media = null;
-
-                    Console.WriteLine(randomPost.PostUrl);
-
-                    HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
-                    {
-                        if (!get.IsCompletedSuccessfully)
-                            return;
-
-                        get.Result.Content.ReadAsStreamAsync().ContinueWith(bytes =>
-                        {
-                            if (!bytes.IsCompletedSuccessfully)
-                                return;
-
-                            media = bot.Client.UploadMedia(bytes.Result);
-                        }).Wait();
-                    }).Wait();
-
-                    if (media == null)
-                        continue;
-
-                    try
-                    {
-                        bot.Client.PostTweet(randomPost.PostUrl, media);
-                        bot.DeletePost(randomPost.PostId);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine(ex);
-                        Cancellation.Cancel();
-                        break;
-                    }
-                }
+                while (!threads.All(t => !t.IsAlive)) Thread.Sleep(500);
             }
 
             CheckUpdates();
