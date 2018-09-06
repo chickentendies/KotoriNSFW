@@ -9,9 +9,10 @@ namespace Kotori
 {
     public sealed class TwitterBot : IDisposable
     {
-        private const int CACHE_SLEEP = 250;
+        public const int REQUEST_INTERVAL = 200;
 
         public bool IsDisposed { get; private set; }
+        public bool IsRefreshingCache { get; private set; }
 
         public readonly int Id;
         public readonly string Name;
@@ -68,7 +69,10 @@ namespace Kotori
 
         public bool EnsureCacheReady()
         {
-            using (SQLiteCommand check = Database.Command($@"SELECT COUNT(`post_id`) > 0 FROM `booru_posts` WHERE `bot_id` = {Id}")) // you can't really exploit a hard in anyway
+            if (IsRefreshingCache)
+                return false;
+
+            using (SQLiteCommand check = Database.Command($@"SELECT COUNT(`post_id`) > 0 FROM `booru_posts` WHERE `bot_id` = {Id}"))
             using (SQLiteDataReader dr = check.ExecuteReader())
                 if (dr.Read() && dr.GetBoolean(0))
                     return true;
@@ -78,6 +82,9 @@ namespace Kotori
 
         public void RefreshCache()
         {
+            if (IsRefreshingCache)
+                return;
+            IsRefreshingCache = true;
             string[] tags = null;
 
             try
@@ -92,7 +99,7 @@ namespace Kotori
             if (tags == null || tags.Length < 1 || tags.Any(string.IsNullOrEmpty))
             {
                 Console.WriteLine(@"Unable to fetch tags.");
-                Environment.Exit(-1);
+                IsRefreshingCache = false;
                 return;
             }
 
@@ -141,9 +148,11 @@ namespace Kotori
                             insert.ExecuteNonQuery();
                         }
 
-                        Thread.Sleep(CACHE_SLEEP);
+                        Thread.Sleep(REQUEST_INTERVAL);
                     }
                 }
+
+            IsRefreshingCache = false;
         }
 
         ~TwitterBot()

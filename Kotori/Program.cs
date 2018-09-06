@@ -10,6 +10,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Tweetinvi.Models;
 
 namespace Kotori
@@ -27,7 +28,7 @@ namespace Kotori
         private static readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
         private static Timer Timer;
 
-        public static TimeSpan Interval => TimeSpan.FromSeconds(30);
+        public static TimeSpan Interval => TimeSpan.FromMinutes(1);
         public static TimeSpan UntilNextRun
         {
             get
@@ -40,6 +41,7 @@ namespace Kotori
         public static readonly List<TwitterBot> Bots = new List<TwitterBot>();
 
         private static readonly object LogLock = new object();
+        private static readonly object DownloadLock = new object();
 
         public static void Log(object log = null, ConsoleColor fg = ConsoleColor.Gray, ConsoleColor bg = ConsoleColor.Black)
         {
@@ -124,6 +126,15 @@ namespace Kotori
                         new TwitterClient(creds)
                     ));
                 }
+
+            LogHeader(@"Checking cache for all bots...");
+            lock (Bots)
+                foreach (TwitterBot bot in Bots)
+                    if (!bot.EnsureCacheReady())
+                    {
+                        Log($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                        bot.RefreshCache();
+                    }
 
             Log($@"Posting after {UntilNextRun}, then a new post will be made every {Interval}!", ConsoleColor.Magenta);
             StartTimer(Run);
@@ -245,18 +256,10 @@ namespace Kotori
             int offset = thread * count;
             LogHeader($@"Running Thread #{thread}");
 
-            IEnumerable<TwitterBot> bots = Bots.Skip(offset).Take(count);
+            IEnumerable<TwitterBot> bots = Bots.Where(b => !b.IsRefreshingCache).Skip(offset).Take(count).ToList();
 
             foreach (TwitterBot bot in bots)
             {
-                LogHeader($@"Validating cache for {bot.Name}", bg: bg);
-
-                if (!bot.EnsureCacheReady())
-                {
-                    Log($@"Refreshing cache for {bot.Name}, this may take a little bit...", bg: bg);
-                    bot.RefreshCache();
-                }
-
                 LogHeader($@"Posting to Twitter from {bot.Name}", bg: bg);
 
                 IBooruPost randomPost = bot.GetRandomPost();
@@ -264,25 +267,37 @@ namespace Kotori
 
                 Log(randomPost.PostUrl, bg: bg);
 
-                HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
-                {
-                    if (!get.IsCompletedSuccessfully)
-                        return;
-
-                    get.Result.Content.ReadAsStreamAsync().ContinueWith(bytes =>
+                lock (DownloadLock)
+                    HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
                     {
-                        if (!bytes.IsCompletedSuccessfully)
+                        if (get.IsFaulted)
+                            Log(get.Exception, ConsoleColor.Red);
+
+                        if (!get.IsCompletedSuccessfully)
                             return;
 
-                        //media = bot.Client.UploadMedia(bytes.Result);
-                        using (MemoryStream ms = new MemoryStream())
+                        Log(get.Result.StatusCode, ConsoleColor.Magenta);
+                        Log(get.Result.ReasonPhrase, ConsoleColor.Cyan);
+
+                        get.Result.Content.ReadAsStreamAsync().ContinueWith(bytes =>
                         {
-                            bytes.Result.CopyTo(ms);
-                            ms.Seek(0, SeekOrigin.Begin);
-                            File.WriteAllBytes(randomPost.FileHash + @"." + randomPost.FileExtension, ms.ToArray());
-                        }
+                            if (bytes.IsFaulted)
+                                Log(bytes.Exception, ConsoleColor.Red);
+
+                            if (!bytes.IsCompletedSuccessfully)
+                                return;
+
+                            //media = bot.Client.UploadMedia(bytes.Result);
+                            using (MemoryStream ms = new MemoryStream())
+                            {
+                                bytes.Result.CopyTo(ms);
+                                ms.Seek(0, SeekOrigin.Begin);
+                                File.WriteAllBytes(randomPost.FileHash + @"." + randomPost.FileExtension, ms.ToArray());
+                            }
+                        }).Wait();
+
+                        Task.Delay(TwitterBot.REQUEST_INTERVAL).Wait();
                     }).Wait();
-                }).Wait();
 
                 if (media == null)
                     continue;
@@ -295,8 +310,14 @@ namespace Kotori
                 catch (Exception ex)
                 {
                     Log(ex, ConsoleColor.Red, bg);
-                    Cancellation.Cancel();
-                    break;
+                }
+                
+                LogHeader($@"Validating cache for {bot.Name}", bg: bg);
+
+                if (!bot.EnsureCacheReady())
+                {
+                    Log($@"Refreshing cache for {bot.Name}, this may take a little bit...", bg: bg);
+                    new Thread(bot.RefreshCache) { IsBackground = true }.Start();
                 }
             }
         }
@@ -307,7 +328,7 @@ namespace Kotori
             {
                 LogHeader(@"Spawning threads...");
 
-                int threadCount = (int)Math.Ceiling(Bots.Count / BOTS_PER_THREAD);
+                int threadCount = (int)Math.Ceiling(Bots.Where(b => !b.IsRefreshingCache).Count() / BOTS_PER_THREAD);
                 List<Thread> threads = new List<Thread>();
 
                 for (int i = 0; i < threadCount; i++)
