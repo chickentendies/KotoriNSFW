@@ -28,7 +28,7 @@ namespace Kotori
         private static readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
         private static Timer Timer;
 
-        public static TimeSpan Interval => TimeSpan.FromMinutes(1);
+        public static TimeSpan Interval => TimeSpan.FromMinutes(15);
         public static TimeSpan UntilNextRun
         {
             get
@@ -152,7 +152,8 @@ namespace Kotori
             DateTime now = DateTime.Now;
             StringBuilder sb = new StringBuilder();
 
-            sb.Append($@"Kotori v{Version}");
+            sb.Append(@"Kotori v");
+            sb.Append(Version);
 #if DEBUG
             sb.Append(@" Debug Build");
 #endif
@@ -223,7 +224,11 @@ namespace Kotori
 
                 try
                 {
-                    updateLines = HttpClient.GetAsync($@"https://flash.moe/kotori-version.txt?{DateTime.Now.Ticks}").Result.Content.ReadAsStringAsync().Result.Split('\n');
+                    updateLines = HttpClient
+                        .GetAsync($@"https://flash.moe/kotori-version.txt?{DateTime.Now.Ticks}")
+                        .Result.Content
+                        .ReadAsStringAsync()
+                        .Result.Split('\n');
                 }
                 catch { }
             }
@@ -262,55 +267,79 @@ namespace Kotori
             {
                 LogHeader($@"Posting to Twitter from {bot.Name}", bg: bg);
 
-                IBooruPost randomPost = bot.GetRandomPost();
+                IBooruPost randomPost = null;
                 IMedia media = null;
 
-                Log(randomPost.PostUrl, bg: bg);
+                int tries = 0;
 
-                lock (DownloadLock)
-                    HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
+                while (media == null && tries < 3)
+                {
+                    ++tries;
+
+                    if (randomPost != null) // if we're here, we probably failed once and we don't want to retry
+                        bot.DeletePost(randomPost.PostId);
+
+                    randomPost = bot.GetRandomPost();
+                    Log(randomPost?.PostUrl ?? @"No posts available", bg: bg);
+
+                    if (randomPost == null)
+                        break;
+
+                    HttpResponseMessage httpResponse;
+
+                    try
                     {
-                        if (get.IsFaulted)
-                            Log(get.Exception, ConsoleColor.Red);
-
-                        if (!get.IsCompletedSuccessfully)
-                            return;
-
-                        Log(get.Result.StatusCode, ConsoleColor.Magenta);
-                        Log(get.Result.ReasonPhrase, ConsoleColor.Cyan);
-
-                        get.Result.Content.ReadAsStreamAsync().ContinueWith(bytes =>
+                        lock (DownloadLock)
                         {
-                            if (bytes.IsFaulted)
-                                Log(bytes.Exception, ConsoleColor.Red);
+                            httpResponse = HttpClient.GetAsync(randomPost.FileUrl).Result;
+                            Thread.Sleep(TwitterBot.REQUEST_INTERVAL);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log(@"Error during request!", ConsoleColor.Black, ConsoleColor.Red);
+                        Log(ex, ConsoleColor.Red);
+                        continue;
+                    }
 
-                            if (!bytes.IsCompletedSuccessfully)
-                                return;
+                    try
+                    {
+                        using (Stream hrs = httpResponse.Content.ReadAsStreamAsync().Result)
+                            media = bot.Client.UploadMedia(hrs);
+                    } catch(Exception ex)
+                    {
+                        Log(@"Error during stream handle!", ConsoleColor.Black, ConsoleColor.Red);
+                        Log(ex, ConsoleColor.Red);
+                        continue;
+                    }
 
-                            //media = bot.Client.UploadMedia(bytes.Result);
-                            using (MemoryStream ms = new MemoryStream())
-                            {
-                                bytes.Result.CopyTo(ms);
-                                ms.Seek(0, SeekOrigin.Begin);
-                                File.WriteAllBytes(randomPost.FileHash + @"." + randomPost.FileExtension, ms.ToArray());
-                            }
-                        }).Wait();
+                    httpResponse?.Dispose(); // fuck it
 
-                        Task.Delay(TwitterBot.REQUEST_INTERVAL).Wait();
-                    }).Wait();
+                    int seconds = 0;
 
-                if (media == null)
-                    continue;
+                    while (!media.IsReadyToBeUsed)
+                    {
+                        Thread.Sleep(1000);
+                        if (++seconds >= 10) break;
+                    }
 
-                try
-                {
-                    bot.Client.PostTweet(randomPost.PostUrl, media);
-                    bot.DeletePost(randomPost.PostId);
+                    if (media?.Data == null)
+                        media = null;
+
+                    Log($@"{bot.Name.PadRight(20)} - Tries: {tries} - Media Null? {media == null}", ConsoleColor.Black, ConsoleColor.Blue);
                 }
-                catch (Exception ex)
-                {
-                    Log(ex, ConsoleColor.Red, bg);
-                }
+
+                if (media != null)
+                    try
+                    {
+                        File.WriteAllBytes(@"_dump/" + randomPost.FileHash + @"." + randomPost.FileExtension, media.Data);
+                        bot.Client.PostTweet(randomPost.PostUrl, media);
+                        bot.DeletePost(randomPost.PostId);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log(ex, ConsoleColor.Red, bg);
+                    }
                 
                 LogHeader($@"Validating cache for {bot.Name}", bg: bg);
 
