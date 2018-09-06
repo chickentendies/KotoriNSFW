@@ -27,7 +27,7 @@ namespace Kotori
         private static readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
         private static Timer Timer;
 
-        public static TimeSpan Interval => TimeSpan.FromMinutes(15);
+        public static TimeSpan Interval => TimeSpan.FromSeconds(30);
         public static TimeSpan UntilNextRun
         {
             get
@@ -39,14 +39,27 @@ namespace Kotori
 
         public static readonly List<TwitterBot> Bots = new List<TwitterBot>();
 
+        private static readonly object LogLock = new object();
+
+        public static void Log(object log = null, ConsoleColor fg = ConsoleColor.Gray, ConsoleColor bg = ConsoleColor.Black)
+        {
+            lock (LogLock)
+            {
+                Console.BackgroundColor = bg;
+                Console.ForegroundColor = fg;
+                Console.WriteLine(log);
+                Console.ResetColor();
+            }
+        }
+
         public static void Main(string[] args)
         {
             Cancellation.Token.Register(() => MRE.Set());
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; Cancellation.Cancel(); };
             AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
 
-            Console.WriteLine($@"Kotori v{Version}");
-            Console.WriteLine(@"THis is still experimental, don't look at it.");
+            Log($@"Kotori v{Version}", ConsoleColor.Green);
+            Log(@"THis is still experimental, don't look at it.");
 
             CheckUpdates();
 
@@ -61,9 +74,9 @@ namespace Kotori
             if (string.IsNullOrEmpty(Database.ReadConfig(@"twitter_consumer_key")))
             {
                 LogHeader(@"Set up Twitter API keys...");
-                Console.WriteLine(@"Please enter your Twitter Consumer Key:");
+                Log(@"Please enter your Twitter Consumer Key:");
                 Database.WriteConfig(@"twitter_consumer_key", Console.ReadLine());
-                Console.WriteLine(@"And now your Twitter Consumer Secret:");
+                Log(@"And now your Twitter Consumer Secret:");
                 Database.WriteConfig(@"twitter_consumer_secret", Console.ReadLine());
             }
 
@@ -94,10 +107,10 @@ namespace Kotori
                     if (string.IsNullOrEmpty(botInfo.AccessToken) || string.IsNullOrEmpty(botInfo.AccessTokenSecret))
                     {
                         IAuthenticationContext ac = TwitterClient.BeginCreateClient(cc);
-                        Console.WriteLine();
-                        Console.WriteLine($@"====> Authenticate {botInfo.Name} <====");
-                        Console.WriteLine(ac.AuthorizationURL);
-                        Console.WriteLine(@"Enter the pin code you received:");
+                        Log();
+                        Log($@"====> Authenticate {botInfo.Name} <====", ConsoleColor.Yellow);
+                        Log(ac.AuthorizationURL);
+                        Log(@"Enter the pin code you received:");
 
                         string pin = Console.ReadLine();
                         creds = TwitterClient.EndCreateClient(ac, pin);
@@ -112,7 +125,7 @@ namespace Kotori
                     ));
                 }
 
-            Console.WriteLine($@"Posting after {UntilNextRun}, then a new post will be made every {Interval}!");
+            Log($@"Posting after {UntilNextRun}, then a new post will be made every {Interval}!", ConsoleColor.Magenta);
             StartTimer(Run);
             MRE.WaitOne();
 
@@ -168,11 +181,11 @@ namespace Kotori
                 Environment.Exit(exitCode);
         }
 
-        public static void LogHeader(string header)
+        public static void LogHeader(string header, ConsoleColor fg = ConsoleColor.Blue, ConsoleColor bg = ConsoleColor.Black)
         {
             ExitIfCancelled();
-            Console.WriteLine();
-            Console.WriteLine(header);
+            Log();
+            Log(header, fg, bg);
         }
 
         public static void StartTimer(Action action)
@@ -205,25 +218,30 @@ namespace Kotori
             }
 
             if (updateLines == null)
-                Console.WriteLine(@"Failed to check for updates.");
+                Log(@"Failed to check for updates.", ConsoleColor.Red);
             else if (updateLines[0].Trim() != Version.ToString())
             {
                 AvailableUpdate = updateLines;
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.BackgroundColor = ConsoleColor.Black;
-                Console.WriteLine($@"An update is available, the latest version is v{updateLines[0].Trim()}!");
 
-                if (updateLines.Length > 1)
-                    for (int i = 1; i < updateLines.Length; i++)
-                        Console.WriteLine(updateLines[i].Trim());
-                else Console.WriteLine(@"Check the download page or contact Flashwave <me@flash.moe> for more information.");
+                lock (LogLock)
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.BackgroundColor = ConsoleColor.Black;
+                    Console.WriteLine($@"An update is available, the latest version is v{updateLines[0].Trim()}!");
 
-                Console.ResetColor();
+                    if (updateLines.Length > 1)
+                        for (int i = 1; i < updateLines.Length; i++)
+                            Console.WriteLine(updateLines[i].Trim());
+                    else Console.WriteLine(@"Check the download page or contact Flashwave <me@flash.moe> for more information.");
+
+                    Console.ResetColor();
+                }
             }
         }
 
         public static void RunThread(int thread, int count)
         {
+            ConsoleColor bg = (ConsoleColor)thread;
             int offset = thread * count;
             LogHeader($@"Running Thread #{thread}");
 
@@ -231,20 +249,20 @@ namespace Kotori
 
             foreach (TwitterBot bot in bots)
             {
-                LogHeader($@"Validating cache for {bot.Name}");
+                LogHeader($@"Validating cache for {bot.Name}", bg: bg);
 
                 if (!bot.EnsureCacheReady())
                 {
-                    Console.WriteLine($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                    Log($@"Refreshing cache for {bot.Name}, this may take a little bit...", bg: bg);
                     bot.RefreshCache();
                 }
 
-                LogHeader($@"Posting to Twitter from {bot.Name}");
+                LogHeader($@"Posting to Twitter from {bot.Name}", bg: bg);
 
                 IBooruPost randomPost = bot.GetRandomPost();
                 IMedia media = null;
 
-                Console.WriteLine(randomPost.PostUrl);
+                Log(randomPost.PostUrl, bg: bg);
 
                 HttpClient.GetAsync(randomPost.FileUrl).ContinueWith(get =>
                 {
@@ -256,7 +274,13 @@ namespace Kotori
                         if (!bytes.IsCompletedSuccessfully)
                             return;
 
-                        media = bot.Client.UploadMedia(bytes.Result);
+                        //media = bot.Client.UploadMedia(bytes.Result);
+                        using (MemoryStream ms = new MemoryStream())
+                        {
+                            bytes.Result.CopyTo(ms);
+                            ms.Seek(0, SeekOrigin.Begin);
+                            File.WriteAllBytes(randomPost.FileHash + @"." + randomPost.FileExtension, ms.ToArray());
+                        }
                     }).Wait();
                 }).Wait();
 
@@ -270,7 +294,7 @@ namespace Kotori
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine(ex);
+                    Log(ex, ConsoleColor.Red, bg);
                     Cancellation.Cancel();
                     break;
                 }
@@ -288,7 +312,8 @@ namespace Kotori
 
                 for (int i = 0; i < threadCount; i++)
                 {
-                    Thread t = new Thread(() => RunThread(i, (int)BOTS_PER_THREAD));
+                    int thread = i;
+                    Thread t = new Thread(() => RunThread(thread, (int)BOTS_PER_THREAD));
                     threads.Add(t);
                     t.Start();
                 }
