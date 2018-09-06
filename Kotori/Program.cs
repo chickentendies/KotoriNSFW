@@ -149,6 +149,21 @@ namespace Kotori
 
         private static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
         {
+            string filename = DumpException(e.ExceptionObject as Exception, e);
+
+            Console.BackgroundColor = ConsoleColor.Black;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine();
+            Console.WriteLine(@"An unhandled exception has occurred.");
+            Console.WriteLine($@"The log has been saved to '{filename}'.");
+            Console.WriteLine(@"Please send this file to Flashwave <me@flash.moe> so he can fix it!");
+            Console.WriteLine(@"Press enter to exit...");
+            Console.ResetColor();
+            Console.ReadLine();
+        }
+
+        public static string DumpException(Exception ex, UnhandledExceptionEventArgs ev = null)
+        {
             DateTime now = DateTime.Now;
             StringBuilder sb = new StringBuilder();
 
@@ -160,10 +175,9 @@ namespace Kotori
             sb.AppendLine();
 
             sb.AppendLine($@"Unhandled exception on {now}");
-            sb.AppendLine($@"Is Terminating: {e.IsTerminating}");
+            if (ev != null)
+                sb.AppendLine($@"Is Terminating: {ev.IsTerminating}");
             sb.AppendLine();
-
-            Exception ex = e.ExceptionObject as Exception;
 
             while (ex != null)
             {
@@ -176,15 +190,7 @@ namespace Kotori
             string filename = $@"Kotori {now:yyyy-MM-dd HH.mm.ss}.log";
             File.WriteAllText(filename, sb.ToString());
 
-            Console.BackgroundColor = ConsoleColor.Black;
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine();
-            Console.WriteLine(@"An unhandled exception has occurred.");
-            Console.WriteLine($@"The log has been saved to '{filename}'.");
-            Console.WriteLine(@"Please send this file to Flashwave <me@flash.moe> so he can fix it!");
-            Console.WriteLine(@"Press enter to exit...");
-            Console.ResetColor();
-            Console.ReadLine();
+            return filename;
         }
 
         public static void ExitIfCancelled(int exitCode = 0)
@@ -255,9 +261,13 @@ namespace Kotori
             }
         }
 
+        public static void LogOnThread(int thread, object log, ConsoleColor fg = ConsoleColor.Gray, ConsoleColor bg = ConsoleColor.Black)
+        {
+            Log($@"Thread #{thread}".PadRight(16) + @" " + log, fg, bg);
+        }
+
         public static void RunThread(int thread, int count)
         {
-            ConsoleColor bg = (ConsoleColor)thread;
             int offset = thread * count;
             LogHeader($@"Running Thread #{thread}");
 
@@ -265,7 +275,7 @@ namespace Kotori
 
             foreach (TwitterBot bot in bots)
             {
-                LogHeader($@"Posting to Twitter from {bot.Name}", bg: bg);
+                LogOnThread(thread, $@"Posting to Twitter from {bot.Name}");
 
                 IBooruPost randomPost = null;
                 IMedia media = null;
@@ -280,7 +290,7 @@ namespace Kotori
                         bot.DeletePost(randomPost.PostId);
 
                     randomPost = bot.GetRandomPost();
-                    Log(randomPost?.PostUrl ?? @"No posts available", bg: bg);
+                    LogOnThread(thread, randomPost?.PostUrl ?? @"No posts available");
 
                     if (randomPost == null)
                         break;
@@ -297,8 +307,9 @@ namespace Kotori
                     }
                     catch (Exception ex)
                     {
-                        Log(@"Error during request!", ConsoleColor.Black, ConsoleColor.Red);
-                        Log(ex, ConsoleColor.Red);
+                        LogOnThread(thread, @"Error during request!", ConsoleColor.Black, ConsoleColor.Red);
+                        LogOnThread(thread, ex, ConsoleColor.Red);
+                        DumpException(ex);
                         continue;
                     }
 
@@ -308,8 +319,9 @@ namespace Kotori
                             media = bot.Client.UploadMedia(hrs);
                     } catch(Exception ex)
                     {
-                        Log(@"Error during stream handle!", ConsoleColor.Black, ConsoleColor.Red);
-                        Log(ex, ConsoleColor.Red);
+                        LogOnThread(thread, @"Error during stream handle!", ConsoleColor.Black, ConsoleColor.Red);
+                        LogOnThread(thread, ex, ConsoleColor.Red);
+                        DumpException(ex);
                         continue;
                     }
 
@@ -326,7 +338,7 @@ namespace Kotori
                     if (media?.Data == null)
                         media = null;
 
-                    Log($@"{bot.Name.PadRight(20)} - Tries: {tries} - Media Null? {media == null}", ConsoleColor.Black, ConsoleColor.Blue);
+                    LogOnThread(thread, $@"{bot.Name.PadRight(20)} - Tries: {tries} - Media Null? {media == null}", ConsoleColor.Black, ConsoleColor.Blue);
                 }
 
                 if (media != null)
@@ -338,14 +350,15 @@ namespace Kotori
                     }
                     catch (Exception ex)
                     {
-                        Log(ex, ConsoleColor.Red, bg);
+                        LogOnThread(thread, ex, ConsoleColor.Red);
+                        DumpException(ex);
                     }
-                
-                LogHeader($@"Validating cache for {bot.Name}", bg: bg);
+
+                LogOnThread(thread, $@"Validating cache for {bot.Name}");
 
                 if (!bot.EnsureCacheReady())
                 {
-                    Log($@"Refreshing cache for {bot.Name}, this may take a little bit...", bg: bg);
+                    LogOnThread(thread, $@"Refreshing cache for {bot.Name}, this may take a little bit...");
                     new Thread(bot.RefreshCache) { IsBackground = true }.Start();
                 }
             }
