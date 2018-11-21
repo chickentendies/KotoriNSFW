@@ -328,7 +328,7 @@ namespace Kotori
 
                     int seconds = 0;
 
-                    while (!media.IsReadyToBeUsed)
+                    while (!(media?.IsReadyToBeUsed ?? false))
                     {
                         Thread.Sleep(1000);
                         if (++seconds >= 10) break;
@@ -343,7 +343,6 @@ namespace Kotori
                 if (media != null)
                     try
                     {
-                        File.WriteAllBytes(@"_dump/" + randomPost.FileHash + @"." + randomPost.FileExtension, media.Data);
                         bot.Client.PostTweet(randomPost.PostUrl, media);
                         bot.DeletePost(randomPost.PostId);
                     }
