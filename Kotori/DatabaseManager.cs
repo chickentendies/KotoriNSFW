@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Data;
 using System.Data.SQLite;
-using System.Text;
 
 namespace Kotori
 {
@@ -84,12 +83,15 @@ namespace Kotori
                 while (dr.Read())
                     try
                     {
+                        object accessToken = dr.GetValue(2);
+                        object accessTokenSecret = dr.GetValue(3);
+
                         bots.Add(new TwitterBotInfo
                         {
                             Id = dr.GetInt32(0),
                             Name = dr.GetString(1),
-                            AccessToken = dr.GetString(2),
-                            AccessTokenSecret = dr.GetString(3),
+                            AccessToken = accessToken.GetType() == typeof(DBNull) ? null : (string)accessToken,
+                            AccessTokenSecret = accessTokenSecret.GetType() == typeof(DBNull) ? null : (string)accessTokenSecret,
                         });
                     } catch { }
 

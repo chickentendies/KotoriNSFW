@@ -5,8 +5,8 @@ using Kotori.Images.Konachan;
 using Kotori.Images.Yandere;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -16,9 +16,7 @@ namespace Kotori
 {
     public static partial class Program
     {
-        public const double BOTS_PER_THREAD = 3d;
-
-        public static readonly Version Version = new Version(4, 0);
+        public static readonly Version Version = new Version(4, 1);
 
         public static readonly HttpClient HttpClient = new HttpClient();
         public static DatabaseManager Database { get; private set; }
@@ -61,8 +59,6 @@ namespace Kotori
 
             Log($@"Kotori v{Version}", ConsoleColor.Green);
             Log(@"THis is still experimental, don't look at it.");
-
-            CheckUpdates();
 
             LogHeader(@"Creating database manager...");
             Database = new DatabaseManager();
@@ -118,12 +114,14 @@ namespace Kotori
                     }
                     else creds = new TwitterCredentials(cc.ConsumerKey, cc.ConsumerSecret, botInfo.AccessToken, botInfo.AccessTokenSecret);
 
-                    Bots.Add(new TwitterBot(
+                    TwitterBot bot = new TwitterBot(
                         Database,
                         boorus,
                         botInfo,
                         new TwitterClient(creds)
-                    ));
+                    );
+                    bot.SaveCredentials();
+                    Bots.Add(bot);
                 }
 
             LogHeader(@"Checking cache for all bots...");
@@ -135,9 +133,14 @@ namespace Kotori
                         bot.RefreshCache();
                     }
 
+#if DEBUG
+            Run();
+            Console.ReadLine();
+#else
             Log($@"Posting after {UntilNextRun}, then a new post will be made every {Interval}!", ConsoleColor.Magenta);
             StartTimer(Run);
             MRE.WaitOne();
+#endif
 
             lock (Bots)
                 foreach (TwitterBot bot in Bots)
@@ -187,7 +190,11 @@ namespace Kotori
             }
 
             string filename = $@"Kotori {now:yyyy-MM-dd HH.mm.ss}.log";
+#if DEBUG
+            Debug.WriteLine(sb.ToString());
+#else
             File.WriteAllText(filename, sb.ToString());
+#endif
 
             return filename;
         }
@@ -216,173 +223,111 @@ namespace Kotori
             Timer?.Dispose();
             Timer = null;
         }
-
-        private static string[] AvailableUpdate = null;
-
-        public static void CheckUpdates()
-        {
-            string[] updateLines = AvailableUpdate;
-
-            if (updateLines == null)
-            {
-                LogHeader(@"Checking for updates...");
-
-                try
-                {
-                    updateLines = HttpClient
-                        .GetAsync($@"https://flash.moe/kotori-version.txt?{DateTime.Now.Ticks}")
-                        .Result.Content
-                        .ReadAsStringAsync()
-                        .Result.Split('\n');
-                }
-                catch { }
-            }
-
-            if (updateLines == null)
-                Log(@"Failed to check for updates.", ConsoleColor.Red);
-            else if (updateLines[0].Trim() != Version.ToString())
-            {
-                AvailableUpdate = updateLines;
-
-                lock (LogLock)
-                {
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.BackgroundColor = ConsoleColor.Black;
-                    Console.WriteLine($@"An update is available, the latest version is v{updateLines[0].Trim()}!");
-
-                    if (updateLines.Length > 1)
-                        for (int i = 1; i < updateLines.Length; i++)
-                            Console.WriteLine(updateLines[i].Trim());
-                    else Console.WriteLine(@"Check the download page or contact Flashwave <me@flash.moe> for more information.");
-
-                    Console.ResetColor();
-                }
-            }
-        }
-
-        public static void LogOnThread(int thread, object log, ConsoleColor fg = ConsoleColor.Gray, ConsoleColor bg = ConsoleColor.Black)
-        {
-            Log($@"Thread #{thread}".PadRight(16) + @" " + log, fg, bg);
-        }
-
-        public static void RunThread(int thread, int count)
-        {
-            int offset = thread * count;
-            LogHeader($@"Running Thread #{thread}");
-
-            IEnumerable<TwitterBot> bots = Bots.Where(b => !b.IsRefreshingCache).Skip(offset).Take(count).ToList();
-
-            foreach (TwitterBot bot in bots)
-            {
-                LogOnThread(thread, $@"Posting to Twitter from {bot.Name}");
-
-                IBooruPost randomPost = null;
-                IMedia media = null;
-
-                int tries = 0;
-
-                while (media == null && tries < 3)
-                {
-                    ++tries;
-
-                    if (randomPost != null) // if we're here, we probably failed once and we don't want to retry
-                        bot.DeletePost(randomPost.PostId);
-
-                    randomPost = bot.GetRandomPost();
-                    LogOnThread(thread, randomPost?.PostUrl ?? @"No posts available");
-
-                    if (randomPost == null)
-                        break;
-
-                    HttpResponseMessage httpResponse;
-
-                    try
-                    {
-                        lock (DownloadLock)
-                        {
-                            httpResponse = HttpClient.GetAsync(randomPost.FileUrl).Result;
-                            Thread.Sleep(TwitterBot.REQUEST_INTERVAL);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        LogOnThread(thread, @"Error during request!", ConsoleColor.Black, ConsoleColor.Red);
-                        LogOnThread(thread, ex, ConsoleColor.Red);
-                        DumpException(ex);
-                        continue;
-                    }
-
-                    try
-                    {
-                        using (Stream hrs = httpResponse.Content.ReadAsStreamAsync().Result)
-                            media = bot.Client.UploadMedia(hrs);
-                    } catch(Exception ex)
-                    {
-                        LogOnThread(thread, @"Error during stream handle!", ConsoleColor.Black, ConsoleColor.Red);
-                        LogOnThread(thread, ex, ConsoleColor.Red);
-                        DumpException(ex);
-                        continue;
-                    }
-
-                    httpResponse?.Dispose(); // fuck it
-
-                    int seconds = 0;
-
-                    while (!(media?.IsReadyToBeUsed ?? false))
-                    {
-                        Thread.Sleep(1000);
-                        if (++seconds >= 10) break;
-                    }
-
-                    if (media?.Data == null)
-                        media = null;
-
-                    LogOnThread(thread, $@"{bot.Name.PadRight(20)} - Tries: {tries} - Media Null? {media == null}", ConsoleColor.Black, ConsoleColor.Blue);
-                }
-
-                if (media != null)
-                    try
-                    {
-                        bot.Client.PostTweet(randomPost.PostUrl, media);
-                        bot.DeletePost(randomPost.PostId);
-                    }
-                    catch (Exception ex)
-                    {
-                        LogOnThread(thread, ex, ConsoleColor.Red);
-                        DumpException(ex);
-                    }
-
-                LogOnThread(thread, $@"Validating cache for {bot.Name}");
-
-                if (!bot.EnsureCacheReady())
-                {
-                    LogOnThread(thread, $@"Refreshing cache for {bot.Name}, this may take a little bit...");
-                    new Thread(bot.RefreshCache) { IsBackground = true }.Start();
-                }
-            }
-        }
-
+        
         public static void Run()
         {
             lock (Bots)
             {
-                LogHeader(@"Spawning threads...");
-
-                int threadCount = (int)Math.Ceiling(Bots.Where(b => !b.IsRefreshingCache).Count() / BOTS_PER_THREAD);
-                List<Thread> threads = new List<Thread>();
-
-                for (int i = 0; i < threadCount; i++)
+                foreach (TwitterBot bot in Bots)
                 {
-                    int thread = i;
-                    Thread t = new Thread(() => RunThread(thread, (int)BOTS_PER_THREAD));
-                    threads.Add(t);
-                    t.Start();
+                    LogHeader($@"Posting to Twitter from {bot.Name}");
+
+                    IBooruPost randomPost = null;
+                    IMedia media = null;
+
+                    int tries = 0;
+
+                    while (media == null && tries < 3)
+                    {
+                        ++tries;
+                        Debug.WriteLine($@"Attempting to prepare media attempt {tries}");
+
+                        if (randomPost != null) // if we're here, we probably failed once and we don't want to retry
+                            bot.DeletePost(randomPost.PostId);
+
+                        randomPost = bot.GetRandomPost();
+                        Log(randomPost?.PostUrl ?? @"No posts available");
+
+                        if (randomPost == null)
+                            break;
+
+                        HttpResponseMessage httpResponse;
+
+                        try
+                        {
+                            lock (DownloadLock)
+                            {
+                                Debug.WriteLine($@"Downloading {randomPost.FileUrl}");
+                                httpResponse = HttpClient.GetAsync(randomPost.FileUrl).Result;
+                                Thread.Sleep(TwitterBot.REQUEST_INTERVAL);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log(@"Error during request!", ConsoleColor.Black, ConsoleColor.Red);
+                            DumpException(ex);
+                            bot.DeletePost(randomPost.PostId);
+                            media = null;
+                            continue;
+                        }
+
+                        try
+                        {
+                            Debug.WriteLine($@"Uploading to Twitter");
+                            using (Stream hrs = httpResponse.Content.ReadAsStreamAsync().Result)
+                                media = bot.Client.UploadMedia(hrs);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log(@"Error during stream handle!", ConsoleColor.Black, ConsoleColor.Red);
+                            DumpException(ex);
+                            bot.DeletePost(randomPost.PostId);
+                            media = null;
+                            continue;
+                        }
+
+                        httpResponse?.Dispose(); // fuck it
+
+                        int seconds = 0;
+
+                        while (!(media?.IsReadyToBeUsed ?? false))
+                        {
+                            Thread.Sleep(1000);
+                            if (++seconds >= 5)
+                            {
+                                bot.DeletePost(randomPost.PostId);
+                                media = null;
+                                break;
+                            }
+                        }
+
+                        if (media?.Data == null)
+                            media = null;
+
+                        Log($@"{bot.Name.PadRight(20)} - Tries: {tries} - Media Null? {media == null}", ConsoleColor.Black, ConsoleColor.Blue);
+                    }
+
+                    if (media != null)
+                        try
+                        {
+                            bot.Client.PostTweet(randomPost.PostUrl, media);
+                            bot.DeletePost(randomPost.PostId);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log(ex, ConsoleColor.Red);
+                            DumpException(ex);
+                        }
+
+                    Log($@"Validating cache for {bot.Name}");
+
+                    if (!bot.EnsureCacheReady())
+                    {
+                        Log($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                        new Thread(bot.RefreshCache) { IsBackground = true }.Start();
+                    }
                 }
-
-                while (!threads.All(t => !t.IsAlive)) Thread.Sleep(500);
             }
-
-            CheckUpdates();
         }
     }
 }

@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.SQLite;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 
@@ -27,6 +28,23 @@ namespace Kotori
             Database = db;
             Boorus = boorus;
             Client = client;
+        }
+
+        public void SaveCredentials()
+        {
+            using (SQLiteCommand setCreds = Database.Command(@"
+                UPDATE `bots`
+                SET `bot_access_token` = @at,
+                    `bot_access_token_secret` = @ats
+                WHERE `bot_id` = @id
+            "))
+            {
+                setCreds.Parameters.AddWithValue(@"@at", Client.TwitterCredentials.AccessToken);
+                setCreds.Parameters.AddWithValue(@"@ats", Client.TwitterCredentials.AccessTokenSecret);
+                setCreds.Parameters.AddWithValue(@"@id", Id);
+                setCreds.Prepare();
+                setCreds.ExecuteNonQuery();
+            }
         }
 
         public IBooruPost GetRandomPost()
@@ -124,6 +142,8 @@ namespace Kotori
                     {
                         foreach (IBooruPost post in posts)
                         {
+                            Debug.WriteLine($@"{post.PostId:000000000} {post.Rating} {post.FileHash} {post.FileUrl}");
+
                             if (string.IsNullOrEmpty(post.FileHash) || post.Rating != @"s") // hardcoding worksafe for now
                                 continue;
 

@@ -57,13 +57,12 @@ namespace Kotori
 
             using (MemoryStream ms = new MemoryStream())
             {
-                int read;
-                byte[] buffer = new byte[1024];
+                if (stream.CanSeek)
+                    stream.Seek(0, SeekOrigin.Begin);
 
-                while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
-                    ms.Write(buffer, 0, read);
-
+                stream.CopyTo(ms);
                 ms.Seek(0, SeekOrigin.Begin);
+
                 media = UploadMedia(ms.ToArray());
             }
 
