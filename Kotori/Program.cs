@@ -166,6 +166,10 @@ namespace Kotori
 
         public static string DumpException(Exception ex, UnhandledExceptionEventArgs ev = null)
         {
+#if !DEBUG
+            return string.Empty;
+#endif
+
             DateTime now = DateTime.Now;
             StringBuilder sb = new StringBuilder();
 
