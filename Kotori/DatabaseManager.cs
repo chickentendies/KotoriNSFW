@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Data;
 using System.Data.SQLite;
+using System.IO;
 
 namespace Kotori
 {
@@ -24,7 +25,20 @@ namespace Kotori
             if (Instance != null)
                 throw new Exception(@"A DatabaseManager instance already exists.");
             Instance = this;
-            Connection = new SQLiteConnection($@"Data Source={DBNAME}").OpenAndReturn();
+
+            string databasePath = DBNAME;
+
+            // check if a db exists in the same directory, otherwise use the one in the user's personal directory
+            // My Documents on Windows
+            // ~ on Linux
+            // don't run my software on macOS
+            if(!File.Exists(DBNAME))
+                databasePath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Personal),
+                    DBNAME
+                );
+
+            Connection = new SQLiteConnection($@"Data Source={databasePath}").OpenAndReturn();
 
             if (Connection?.State != ConnectionState.Open)
             {
