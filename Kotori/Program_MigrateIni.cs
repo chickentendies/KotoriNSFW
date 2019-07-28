@@ -11,10 +11,10 @@ namespace Kotori
 
         public static void MigrateIni()
         {
-            if (!File.Exists(LEGACY_CONFIG))
+            if (!File.Exists(LEGACY_CONFIG) || Cancellation.IsCancellationRequested)
                 return;
 
-            LogHeader(@"Migrating legacy configuration...");
+            Logger.Write(@"Migrating legacy configuration...");
 
             string[] lines = File.ReadAllLines(LEGACY_CONFIG);
             string section = string.Empty;
