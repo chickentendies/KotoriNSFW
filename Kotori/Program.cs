@@ -16,7 +16,7 @@ namespace Kotori
 {
     public static partial class Program
     {
-        public static readonly Version Version = new Version(4, 1);
+        public static readonly Version Version = new Version(4, 2);
 
         public static readonly HttpClient HttpClient = new HttpClient();
         public static DatabaseManager Database { get; private set; }
@@ -37,19 +37,7 @@ namespace Kotori
 
         public static readonly List<TwitterBot> Bots = new List<TwitterBot>();
 
-        private static readonly object LogLock = new object();
         private static readonly object DownloadLock = new object();
-
-        public static void Log(object log = null, ConsoleColor fg = ConsoleColor.Gray, ConsoleColor bg = ConsoleColor.Black)
-        {
-            lock (LogLock)
-            {
-                Console.BackgroundColor = bg;
-                Console.ForegroundColor = fg;
-                Console.WriteLine(log);
-                Console.ResetColor();
-            }
-        }
 
         public static void Main(string[] args)
         {
@@ -57,8 +45,7 @@ namespace Kotori
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; Cancellation.Cancel(); };
             AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
 
-            Log($@"Kotori v{Version}", ConsoleColor.Green);
-            Log(@"THis is still experimental, don't look at it.");
+            Logger.Write($@"Kotori v{Version}");
 
             LogHeader(@"Creating database manager...");
             Database = new DatabaseManager();
@@ -71,9 +58,9 @@ namespace Kotori
             if (string.IsNullOrEmpty(Database.ReadConfig(@"twitter_consumer_key")))
             {
                 LogHeader(@"Set up Twitter API keys...");
-                Log(@"Please enter your Twitter Consumer Key:");
+                Logger.Write(@"Please enter your Twitter Consumer Key:");
                 Database.WriteConfig(@"twitter_consumer_key", Console.ReadLine());
-                Log(@"And now your Twitter Consumer Secret:");
+                Logger.Write(@"And now your Twitter Consumer Secret:");
                 Database.WriteConfig(@"twitter_consumer_secret", Console.ReadLine());
             }
 
@@ -104,10 +91,10 @@ namespace Kotori
                     if (string.IsNullOrEmpty(botInfo.AccessToken) || string.IsNullOrEmpty(botInfo.AccessTokenSecret))
                     {
                         IAuthenticationContext ac = TwitterClient.BeginCreateClient(cc);
-                        Log();
-                        Log($@"====> Authenticate {botInfo.Name} <====", ConsoleColor.Yellow);
-                        Log(ac.AuthorizationURL);
-                        Log(@"Enter the pin code you received:");
+                        Logger.Write(string.Empty);
+                        Logger.Write($@"====> Authenticate {botInfo.Name} <====");
+                        Logger.Write(ac.AuthorizationURL);
+                        Logger.Write(@"Enter the pin code you received:");
 
                         string pin = Console.ReadLine();
                         creds = TwitterClient.EndCreateClient(ac, pin);
@@ -129,7 +116,7 @@ namespace Kotori
                 foreach (TwitterBot bot in Bots)
                     if (!bot.EnsureCacheReady())
                     {
-                        Log($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                        Logger.Write($@"Refreshing cache for {bot.Name}, this may take a little bit...");
                         bot.RefreshCache();
                     }
 
@@ -137,7 +124,7 @@ namespace Kotori
             Run();
             Console.ReadLine();
 #else
-            Log($@"Posting after {UntilNextRun}, then a new post will be made every {Interval}!", ConsoleColor.Magenta);
+            Logger.Write($@"Posting after {UntilNextRun}, then a new post will be made every {Interval}!");
             StartTimer(Run);
             MRE.WaitOne();
 #endif
@@ -153,14 +140,11 @@ namespace Kotori
         {
             string filename = DumpException(e.ExceptionObject as Exception, e);
 
-            Console.BackgroundColor = ConsoleColor.Black;
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine();
-            Console.WriteLine(@"An unhandled exception has occurred.");
-            Console.WriteLine($@"The log has been saved to '{filename}'.");
-            Console.WriteLine(@"Please send this file to Flashwave <me@flash.moe> so he can fix it!");
-            Console.WriteLine(@"Press enter to exit...");
-            Console.ResetColor();
+            Logger.Write(string.Empty);
+            Logger.Write(@"An unhandled exception has occurred.");
+            Logger.Write($@"The log has been saved to '{filename}'.");
+            Logger.Write(@"Please send this file to Flashwave <me@flash.moe> so he can fix it!");
+            Logger.Write(@"Press enter to exit...");
             Console.ReadLine();
         }
 
@@ -209,11 +193,11 @@ namespace Kotori
                 Environment.Exit(exitCode);
         }
 
-        public static void LogHeader(string header, ConsoleColor fg = ConsoleColor.Blue, ConsoleColor bg = ConsoleColor.Black)
+        public static void LogHeader(string header)
         {
             ExitIfCancelled();
-            Log();
-            Log(header, fg, bg);
+            Logger.Write(string.Empty);
+            Logger.Write(header);
         }
 
         public static void StartTimer(Action action)
@@ -250,7 +234,7 @@ namespace Kotori
                             bot.DeletePost(randomPost.PostId);
 
                         randomPost = bot.GetRandomPost();
-                        Log(randomPost?.PostUrl ?? @"No posts available");
+                        Logger.Write(randomPost?.PostUrl ?? @"No posts available");
 
                         if (randomPost == null)
                             break;
@@ -268,7 +252,7 @@ namespace Kotori
                         }
                         catch (Exception ex)
                         {
-                            Log(@"Error during request!", ConsoleColor.Black, ConsoleColor.Red);
+                            Logger.Write(@"Error during request!");
                             DumpException(ex);
                             bot.DeletePost(randomPost.PostId);
                             media = null;
@@ -283,7 +267,7 @@ namespace Kotori
                         }
                         catch (Exception ex)
                         {
-                            Log(@"Error during stream handle!", ConsoleColor.Black, ConsoleColor.Red);
+                            Logger.Write(@"Error during stream handle!");
                             DumpException(ex);
                             bot.DeletePost(randomPost.PostId);
                             media = null;
@@ -307,8 +291,6 @@ namespace Kotori
 
                         if (media?.Data == null)
                             media = null;
-
-                        Log($@"{bot.Name.PadRight(20)} - Tries: {tries} - Media Null? {media == null}", ConsoleColor.Black, ConsoleColor.Blue);
                     }
 
                     if (media != null)
@@ -319,15 +301,15 @@ namespace Kotori
                         }
                         catch (Exception ex)
                         {
-                            Log(ex, ConsoleColor.Red);
+                            Logger.Write(ex);
                             DumpException(ex);
                         }
 
-                    Log($@"Validating cache for {bot.Name}");
+                    Logger.Write($@"Validating cache for {bot.Name}");
 
                     if (!bot.EnsureCacheReady())
                     {
-                        Log($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                        Logger.Write($@"Refreshing cache for {bot.Name}, this may take a little bit...");
                         new Thread(bot.RefreshCache) { IsBackground = true }.Start();
                     }
                 }
