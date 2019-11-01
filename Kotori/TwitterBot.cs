@@ -6,12 +6,14 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 
+
 namespace Kotori
 {
+   
     public sealed class TwitterBot : IDisposable
     {
         public const int REQUEST_INTERVAL = 200;
-
+       
         public bool IsDisposed { get; private set; }
         public bool IsRefreshingCache { get; private set; }
 
@@ -20,11 +22,14 @@ namespace Kotori
         public readonly DatabaseManager Database;
         public readonly TwitterClient Client;
         public readonly IEnumerable<IBooru> Boorus;
-        
+        public readonly string Rating;
+        public readonly string botRating; //added new string
         public TwitterBot(DatabaseManager db, IEnumerable<IBooru> boorus, TwitterBotInfo info, TwitterClient client)
         {
             Id = info.Id;
             Name = info.Name;
+            Rating = info.Rating;
+            botRating = info.botRating; // added new string
             Database = db;
             Boorus = boorus;
             Client = client;
@@ -35,6 +40,7 @@ namespace Kotori
             using (SQLiteCommand setCreds = Database.Command(@"
                 UPDATE `bots`
                 SET `bot_access_token` = @at,
+                   
                     `bot_access_token_secret` = @ats
                 WHERE `bot_id` = @id
             "))
@@ -51,10 +57,13 @@ namespace Kotori
         {
             try
             {
+                string checkRating = botRating == @"s" ? @"=" : @"!="; 
+
                 using (SQLiteCommand fetchPost = Database.Command($@"
                     SELECT `post_id`, `post_url`, `post_rating`, `file_url`, `file_hash`, `file_extension`
                     FROM `booru_posts`
                     WHERE `bot_id` = {Id}
+                    AND `post_rating` {checkRating} 's'
                     ORDER BY RANDOM()
                     LIMIT 1
                 "))
@@ -71,8 +80,8 @@ namespace Kotori
                         };
             }
             catch { }
-
-            return null;
+           
+           return null;
         }
 
         public void DeletePost(string postId)
@@ -88,14 +97,15 @@ namespace Kotori
         public bool EnsureCacheReady()
         {
             if (IsRefreshingCache)
-                return false;
+                return false; 
+            string checkRating = botRating == @"s" ? @"=" : @"!=";
 
-            using (SQLiteCommand check = Database.Command($@"SELECT COUNT(`post_id`) > 0 FROM `booru_posts` WHERE `bot_id` = {Id}"))
+            using (SQLiteCommand check = Database.Command($@"SELECT COUNT(`post_id`) > 0 FROM `booru_posts` WHERE `bot_id` = {Id} AND `post_rating` {checkRating} 's'"))
             using (SQLiteDataReader dr = check.ExecuteReader())
                 if (dr.Read() && dr.GetBoolean(0))
-                    return true;
+                    return true; 
 
-            return false;
+            return false; 
         }
 
         public void RefreshCache()
@@ -144,7 +154,7 @@ namespace Kotori
                         {
                             Debug.WriteLine($@"{post.PostId:000000000} {post.Rating} {post.FileHash} {post.FileUrl}");
 
-                            if (string.IsNullOrEmpty(post.FileHash) || post.Rating != @"s") // hardcoding worksafe for now
+                            if (string.IsNullOrEmpty(post.FileHash)) // modified and removed || Rating ==@"s" && post.Rating != @"s"
                                 continue;
 
                             check.Parameters.Clear();

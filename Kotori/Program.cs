@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using Tweetinvi.Models;
 
@@ -15,49 +16,73 @@ namespace Kotori
 {
     public static partial class Program
     {
-        public static readonly Version Version = new Version(4, 2);
+        public static readonly Version Version = new Version(4, 1, 1);
 
         public static readonly HttpClient HttpClient = new HttpClient();
         public static DatabaseManager Database { get; private set; }
 
+        private static readonly ManualResetEvent MRE = new ManualResetEvent(false);
         private static readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
+        private static Timer Timer;
+
+        public static TimeSpan Interval => TimeSpan.FromMinutes(15);
+        public static TimeSpan UntilNextRun
+        {
+            get
+            {
+                DateTime now = DateTime.Now;
+                return now.RoundUp(Interval) - now;
+            }
+        }
 
         public static readonly List<TwitterBot> Bots = new List<TwitterBot>();
 
+        private static readonly object LogLock = new object();
         private static readonly object DownloadLock = new object();
 
+        public static void Log(object log = null, ConsoleColor fg = ConsoleColor.Gray, ConsoleColor bg = ConsoleColor.Black)
+        {
+            lock (LogLock)
+            {
+                Console.BackgroundColor = bg;
+                Console.ForegroundColor = fg;
+                Console.WriteLine(log);
+                Console.ResetColor();
+            }
+        }
+        
         public static void Main(string[] args)
         {
+            Cancellation.Token.Register(() => MRE.Set());
             Console.CancelKeyPress += (s, e) => { e.Cancel = true; Cancellation.Cancel(); };
-            Logger.Write($@"Kotori v{Version}");
+            AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
 
-            if (Cancellation.IsCancellationRequested)
-                return;
+            
 
-            Logger.Write(@"Creating database manager...");
+            Log($@"KotoriNSFW v{Version}", ConsoleColor.Green);
+            Log(@"THis is still experimental, don't look at it.");
+            Log(@"WARNING: THIS WILL POST NSFW EVEN IF BOT_RATING IS SET TO S", ConsoleColor.DarkRed);
+            Log(@"Press any key if you understand and are ok with this...");
+            Console.ReadKey();
+
+            LogHeader(@"Creating database manager...");
             Database = new DatabaseManager();
 
-            Logger.Write(@"Running migrations...");
+            LogHeader(@"Running migrations...");
             Database.RunMigrations();
 
             MigrateIni();
 
-            if (Cancellation.IsCancellationRequested)
-            {
-                Database.Dispose();
-                return;
-            }
-
             if (string.IsNullOrEmpty(Database.ReadConfig(@"twitter_consumer_key")))
             {
-                Logger.Write(@"Set up Twitter API keys...");
-                Logger.Write(@"Please enter your Twitter Consumer Key:");
+                LogHeader(@"Set up Twitter API keys...");
+                Log(@"Please enter your Twitter Consumer Key:");
                 Database.WriteConfig(@"twitter_consumer_key", Console.ReadLine());
-                Logger.Write(@"And now your Twitter Consumer Secret:");
+                Log(@"And now your Twitter Consumer Secret:");
                 Database.WriteConfig(@"twitter_consumer_secret", Console.ReadLine());
             }
 
-            Logger.Write(@"Creating booru clients...");
+            LogHeader(@"Creating booru clients...");
 
             IBooru[] boorus = new IBooru[] {
                 new Danbooru(HttpClient),
@@ -71,65 +96,56 @@ namespace Kotori
                 Database.ReadConfig(@"twitter_consumer_secret")
             );
 
-            if (!Cancellation.IsCancellationRequested)
-            {
-                Logger.Write(@"Setting bots up...");
-                lock (Bots)
-                    foreach (TwitterBotInfo botInfo in Database.GetBots())
+            LogHeader(@"Creating bots...");
+
+            lock (Bots)
+                foreach (TwitterBotInfo botInfo in Database.GetBots())
+                {
+                    if (Cancellation.IsCancellationRequested)
+                        break;
+
+                    ITwitterCredentials creds;
+
+                    if (string.IsNullOrEmpty(botInfo.AccessToken) || string.IsNullOrEmpty(botInfo.AccessTokenSecret))
                     {
-                        if (Cancellation.IsCancellationRequested)
-                            break;
+                        IAuthenticationContext ac = TwitterClient.BeginCreateClient(cc);
+                        Log();
+                        Log($@"====> Authenticate {botInfo.Name} <====", ConsoleColor.Yellow);
+                        Log(ac.AuthorizationURL);
+                        Log(@"Enter the pin code you received:");
 
-                        ITwitterCredentials creds;
-
-                        if (string.IsNullOrEmpty(botInfo.AccessToken) || string.IsNullOrEmpty(botInfo.AccessTokenSecret))
-                        {
-                            IAuthenticationContext ac = TwitterClient.BeginCreateClient(cc);
-                            Logger.Write(string.Empty);
-                            Logger.Write($@"====> Authenticate {botInfo.Name} <====");
-                            Logger.Write(ac.AuthorizationURL);
-                            Logger.Write(@"Enter the pin code you received:");
-
-                            string pin = Console.ReadLine();
-                            creds = TwitterClient.EndCreateClient(ac, pin);
-                        }
-                        else creds = new TwitterCredentials(cc.ConsumerKey, cc.ConsumerSecret, botInfo.AccessToken, botInfo.AccessTokenSecret);
-
-                        TwitterBot bot = new TwitterBot(
-                            Database,
-                            boorus,
-                            botInfo,
-                            new TwitterClient(creds)
-                        );
-                        bot.SaveCredentials();
-                        Bots.Add(bot);
+                        string pin = Console.ReadLine();
+                        creds = TwitterClient.EndCreateClient(ac, pin);
                     }
-            }
+                    else creds = new TwitterCredentials(cc.ConsumerKey, cc.ConsumerSecret, botInfo.AccessToken, botInfo.AccessTokenSecret);
 
-            if (!Cancellation.IsCancellationRequested)
-            {
-                Logger.Write(@"Checking cache for all bots...");
-                lock (Bots)
-                    foreach (TwitterBot bot in Bots)
+                    TwitterBot bot = new TwitterBot(
+                        Database,
+                        boorus,
+                        botInfo,
+                        new TwitterClient(creds)
+                    );
+                    bot.SaveCredentials();
+                    Bots.Add(bot);
+                }
+
+            LogHeader(@"Checking cache for all bots...");
+            lock (Bots)
+                foreach (TwitterBot bot in Bots)
+                    if (!bot.EnsureCacheReady())
                     {
-                        if (Cancellation.IsCancellationRequested)
-                            break;
-
-                        if (!bot.EnsureCacheReady())
-                        {
-                            Logger.Write($@"Refreshing cache for {bot.Name}, this may take a little bit...");
-                            bot.RefreshCache();
-                        }
+                        Log($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                        bot.RefreshCache();
                     }
-            }
 
-            if (!Cancellation.IsCancellationRequested)
-            {
-                Run();
 #if DEBUG
-                Console.ReadLine();
+            Run();
+            Console.ReadLine();
+#else
+            Log($@"Posting after {UntilNextRun}, then a new post will be made every {Interval}!", ConsoleColor.Magenta);
+            StartTimer(Run);
+            MRE.WaitOne();
 #endif
-            }
 
             lock (Bots)
                 foreach (TwitterBot bot in Bots)
@@ -138,20 +154,95 @@ namespace Kotori
             Database.Dispose();
         }
 
+        private static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
+        {
+            string filename = DumpException(e.ExceptionObject as Exception, e);
+
+            Console.BackgroundColor = ConsoleColor.Black;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine();
+            Console.WriteLine(@"An unhandled exception has occurred.");
+            Console.WriteLine($@"The log has been saved to '{filename}'.");
+            Console.WriteLine(@"Please send this file to Flashwave <me@flash.moe> so he can fix it!");
+            Console.WriteLine(@"Press enter to exit...");
+            Console.ResetColor();
+            Console.ReadLine();
+        }
+
+        public static string DumpException(Exception ex, UnhandledExceptionEventArgs ev = null)
+        {
+            DateTime now = DateTime.Now;
+            StringBuilder sb = new StringBuilder();
+
+            sb.Append(@"Kotori v");
+            sb.Append(Version);
+#if DEBUG
+            sb.Append(@" Debug Build");
+#endif
+            sb.AppendLine();
+
+            sb.AppendLine($@"Unhandled exception on {now}");
+            if (ev != null)
+                sb.AppendLine($@"Is Terminating: {ev.IsTerminating}");
+            sb.AppendLine();
+
+            while (ex != null)
+            {
+                sb.Append(ex);
+                sb.AppendLine();
+                sb.AppendLine();
+                ex = ex.InnerException;
+            }
+
+            string filename = $@"Kotori {now:yyyy-MM-dd HH.mm.ss}.log";
+#if DEBUG
+            Debug.WriteLine(sb.ToString());
+#else
+            File.WriteAllText(filename, sb.ToString());
+#endif
+
+            return filename;
+        }
+
+        public static void ExitIfCancelled(int exitCode = 0)
+        {
+            if (Cancellation.IsCancellationRequested)
+                Environment.Exit(exitCode);
+        }
+
+        public static void LogHeader(string header, ConsoleColor fg = ConsoleColor.Blue, ConsoleColor bg = ConsoleColor.Black)
+        {
+            ExitIfCancelled();
+            Log();
+            Log(header, fg, bg);
+        }
+
+        public static void StartTimer(Action action)
+        {
+            StopTimer();
+            Timer = new Timer(s => action.Invoke(), null, UntilNextRun, Interval);
+        }
+
+        public static void StopTimer()
+        {
+            Timer?.Dispose();
+            Timer = null;
+        }
+        
         public static void Run()
         {
             lock (Bots)
             {
                 foreach (TwitterBot bot in Bots)
                 {
-                    Logger.Write($@"Posting to Twitter from {bot.Name}");
+                    LogHeader($@"Posting to Twitter from {bot.Name}");
 
                     IBooruPost randomPost = null;
                     IMedia media = null;
 
                     int tries = 0;
 
-                    while (media == null && tries < 3)
+                    while (media == null && tries < 10)
                     {
                         ++tries;
                         Debug.WriteLine($@"Attempting to prepare media attempt {tries}");
@@ -160,7 +251,7 @@ namespace Kotori
                             bot.DeletePost(randomPost.PostId);
 
                         randomPost = bot.GetRandomPost();
-                        Logger.Write(randomPost?.PostUrl ?? @"No posts available");
+                        Log(randomPost?.PostUrl ?? @"No posts available");
 
                         if (randomPost == null)
                             break;
@@ -178,8 +269,8 @@ namespace Kotori
                         }
                         catch (Exception ex)
                         {
-                            Logger.Write(@"Error during request!");
-                            Logger.Write(ex);
+                            Log(@"Error during request!", ConsoleColor.Black, ConsoleColor.Red);
+                            DumpException(ex);
                             bot.DeletePost(randomPost.PostId);
                             media = null;
                             continue;
@@ -193,8 +284,8 @@ namespace Kotori
                         }
                         catch (Exception ex)
                         {
-                            Logger.Write(@"Error during stream handle!");
-                            Logger.Write(ex);
+                            Log(@"Error during stream handle!", ConsoleColor.Black, ConsoleColor.Red);
+                            DumpException(ex);
                             bot.DeletePost(randomPost.PostId);
                             media = null;
                             continue;
@@ -204,7 +295,7 @@ namespace Kotori
 
                         int seconds = 0;
 
-                        while (!(media?.IsReadyToBeUsed ?? false))
+                        while (!(media?.IsReadyToBeUsed ?? false))//false
                         {
                             Thread.Sleep(1000);
                             if (++seconds >= 5)
@@ -217,6 +308,8 @@ namespace Kotori
 
                         if (media?.Data == null)
                             media = null;
+
+                        Log($@"{bot.Name.PadRight(20)} - Tries: {tries} - Media Null? {media == null}", ConsoleColor.Black, ConsoleColor.Blue);
                     }
 
                     if (media != null)
@@ -227,12 +320,17 @@ namespace Kotori
                         }
                         catch (Exception ex)
                         {
-#if DEBUG
-                            throw ex;
-#else
-                            Logger.Write(ex);
-#endif
+                            Log(ex, ConsoleColor.Red);
+                            DumpException(ex);
                         }
+
+                    Log($@"Validating cache for {bot.Name}");
+
+                    if (!bot.EnsureCacheReady())
+                    {
+                        Log($@"Refreshing cache for {bot.Name}, this may take a little bit...");
+                        new Thread(bot.RefreshCache) { IsBackground = true }.Start();
+                    }
                 }
             }
         }
